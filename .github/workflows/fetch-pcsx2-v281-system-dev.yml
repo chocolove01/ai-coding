@@ -1,0 +1,35 @@
+name: fetch pcsx2 v2.8.1 linux system dev
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-pcsx2-v281-system-dev.yml'
+  workflow_dispatch:
+jobs:
+  pack-dev:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install minimal development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libxrandr-dev libudev-dev
+      - name: Stage prefix
+        run: |
+          set -euo pipefail
+          P="$GITHUB_WORKSPACE/sysdev"
+          mkdir -p "$P/include/X11/extensions" "$P/include" "$P/lib/pkgconfig"
+          cp -a /usr/include/X11/extensions/Xrandr.h /usr/include/X11/extensions/randr.h /usr/include/X11/extensions/randrproto.h "$P/include/X11/extensions/"
+          cp -a /usr/include/libudev.h "$P/include/"
+          cp -a /usr/lib/x86_64-linux-gnu/libXrandr.so* "$P/lib/"
+          cp -a /usr/lib/x86_64-linux-gnu/libudev.so* "$P/lib/"
+          cp -a /usr/lib/x86_64-linux-gnu/pkgconfig/xrandr.pc "$P/lib/pkgconfig/"
+          cp -a /usr/lib/x86_64-linux-gnu/pkgconfig/libudev.pc "$P/lib/pkgconfig/"
+          tar -I 'zstd -10 -T0' -cf pcsx2-2.8.1-system-dev.tar.zst sysdev
+          sha256sum pcsx2-2.8.1-system-dev.tar.zst > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PCSX2-2.8.1-public-system-dev
+          path: |
+            pcsx2-2.8.1-system-dev.tar.zst
+            SHA256SUMS.txt
+          compression-level: 0
+          retention-days: 1

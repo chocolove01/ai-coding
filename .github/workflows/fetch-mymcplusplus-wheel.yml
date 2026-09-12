@@ -1,0 +1,23 @@
+name: fetch mymcplusplus wheel
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-mymcplusplus-wheel.yml'
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Fetch CLI wheel
+        run: |
+          set -euo pipefail
+          python3 -m pip download --only-binary=:all: --no-deps -d out mymcplusplus
+          sha256sum out/* > SHA256SUMS.txt
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: mymcplusplus-wheel
+          path: |
+            out/*
+            SHA256SUMS.txt
+          retention-days: 1

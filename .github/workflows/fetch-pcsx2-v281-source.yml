@@ -1,0 +1,29 @@
+name: fetch pcsx2 v2.8.1 source
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-pcsx2-v281-source.yml'
+  workflow_dispatch:
+jobs:
+  fetch-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone PCSX2 v2.8.1 recursively
+        run: |
+          git clone --depth 1 --branch v2.8.1 --recursive https://github.com/PCSX2/pcsx2.git pcsx2-2.8.1
+          git -C pcsx2-2.8.1 rev-parse HEAD | tee PCSX2_COMMIT.txt
+          git -C pcsx2-2.8.1 submodule status --recursive > PCSX2_SUBMODULES.txt
+          rm -rf pcsx2-2.8.1/.git
+          tar -I 'zstd -19 -T0' -cf pcsx2-2.8.1-source.tar.zst pcsx2-2.8.1 PCSX2_COMMIT.txt PCSX2_SUBMODULES.txt
+          sha256sum pcsx2-2.8.1-source.tar.zst > SHA256SUMS.txt
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCSX2-2.8.1-public-source
+          path: |
+            pcsx2-2.8.1-source.tar.zst
+            PCSX2_COMMIT.txt
+            PCSX2_SUBMODULES.txt
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1

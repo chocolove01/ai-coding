@@ -20,16 +20,17 @@ jobs:
           packages='libc6-dev libc6 linux-libc-dev libstdc++-11-dev libstdc++6 libgcc-11-dev libgcc-s1 libatomic1'
           for pkg in $packages; do dpkg -L "$pkg"; done | sort -u > package-files.txt
           while IFS= read -r f; do
-            if [ -f "$f" ] || [ -L "$f" ]; then
-              mkdir -p "$ROOT$(dirname "$f")"
-              cp -a "$f" "$ROOT$f"
-            fi
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            # Skip directory entries (including merged-/usr directory symlinks such as /lib).
+            [ -d "$f" ] && continue
+            mkdir -p "$ROOT$(dirname "$f")"
+            cp -L --preserve=mode,timestamps "$f" "$ROOT$f"
           done < package-files.txt
-          # Dynamic loader aliases used by clang/lld and the produced ELF.
+          # Ensure dynamic loader aliases exist as regular files inside the sysroot.
           for f in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
             if [ -e "$f" ] || [ -L "$f" ]; then
               mkdir -p "$ROOT$(dirname "$f")"
-              cp -a "$f" "$ROOT$f"
+              cp -L --preserve=mode,timestamps "$f" "$ROOT$f"
             fi
           done
           tar -I 'zstd -10 -T0' -cf ubuntu22-cxx-sysroot.tar.zst -C "$ROOT" .

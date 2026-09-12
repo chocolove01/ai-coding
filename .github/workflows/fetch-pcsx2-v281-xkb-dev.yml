@@ -1,0 +1,36 @@
+name: fetch pcsx2 v2.8.1 xkb dev
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-pcsx2-v281-xkb-dev.yml'
+  workflow_dispatch:
+jobs:
+  pack-dev:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install XKB development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libxkbcommon-dev libxkbcommon-x11-dev
+      - name: Stage public XKB development files
+        run: |
+          set -euo pipefail
+          P="$GITHUB_WORKSPACE/xkbdev"
+          mkdir -p "$P/include" "$P/lib/pkgconfig"
+          cp -a /usr/include/xkbcommon "$P/include/"
+          cp -a /usr/lib/x86_64-linux-gnu/libxkbcommon.so* "$P/lib/"
+          cp -a /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so* "$P/lib/" || true
+          cp -a /usr/lib/x86_64-linux-gnu/pkgconfig/xkbcommon.pc "$P/lib/pkgconfig/"
+          cp -a /usr/lib/x86_64-linux-gnu/pkgconfig/xkbcommon-x11.pc "$P/lib/pkgconfig/" || true
+          tar -I 'zstd -10 -T0' -cf pcsx2-2.8.1-xkb-dev.tar.zst xkbdev
+          sha256sum pcsx2-2.8.1-xkb-dev.tar.zst > SHA256SUMS.txt
+      - name: Upload XKB development files
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCSX2-2.8.1-public-xkb-dev
+          path: |
+            pcsx2-2.8.1-xkb-dev.tar.zst
+            SHA256SUMS.txt
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1

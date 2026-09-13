@@ -1,0 +1,138 @@
+name: build PCSX2 2.8.1 generic GIF provenance v2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-pcsx2-v281-gif-provenance-v2.yml'
+      - 'tools/pcsx2_giftrace_patch.py'
+      - 'tools/giftrace_decode.py'
+      - 'docs/PCSX2_GIF_PROVENANCE_V2.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      PCSX2_COMMIT: d073d75010090186b58eb38bfc78dfc2f3acd8c7
+      APPIMAGE_NAME: PCSX2-2.8.1-GIF-Provenance-v2
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+    steps:
+      - name: Checkout helper repository
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned PCSX2 2.8.1 and apply generic tracer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --branch v2.8.1 --depth 1 --recurse-submodules --shallow-submodules https://github.com/PCSX2/pcsx2.git pcsx2-src
+          test "$(git -C pcsx2-src rev-parse HEAD)" = "$PCSX2_COMMIT"
+          PCSX2_SOURCE_DIR="$GITHUB_WORKSPACE/pcsx2-src" python3 tools/pcsx2_giftrace_patch.py
+          git -C pcsx2-src diff --check
+          git -C pcsx2-src diff -- pcsx2/Gif.cpp pcsx2/Gif_Unit.cpp > pcsx2_gif_provenance_v2.patch
+          test -s pcsx2_gif_provenance_v2.patch
+
+      - name: Install build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          sudo apt-add-repository -y 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main'
+          sudo apt-get update
+          sudo apt-get -y install \
+            build-essential ccache clang-17 cmake curl extra-cmake-modules git libasound2-dev libaio-dev \
+            libcurl4-openssl-dev libdbus-1-dev libdecor-0-dev libegl-dev libevdev-dev libfontconfig-dev libfreetype-dev libfuse2 libgtk-3-dev libgudev-1.0-dev \
+            libharfbuzz-dev libinput-dev libopengl-dev libopus-dev libpcap-dev libpipewire-0.3-dev libpulse-dev libssl-dev libudev-dev libva-dev libvpl2 libvpl-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev libx264-dev libxcb1-dev libxcb-composite0-dev libxcb-cursor-dev libxcb-damage0-dev libxcb-glx0-dev libxcb-icccm4-dev \
+            libxcb-image0-dev libxcb-keysyms1-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev libxcb-shape0-dev \
+            libxcb-shm0-dev libxcb-sync-dev libxcb-util-dev libxcb-xfixes0-dev libxcb-xinput-dev libxcb-xkb-dev libxext-dev libxkbcommon-x11-dev libxrandr-dev \
+            lld-17 llvm-17 nasm ninja-build patchelf pkg-config zlib1g-dev
+
+      - name: Restore dependency prefix cache
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/deps
+          key: pcsx2-v281-official-deps-20260914
+
+      - name: Build official dependency prefix
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        working-directory: pcsx2-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_FFMPEG=1 .github/workflows/scripts/linux/build-dependencies-qt.sh "$HOME/deps"
+
+      - name: Download patch database
+        working-directory: pcsx2-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://github.com/PCSX2/pcsx2_patches/releases/latest/download/patches.zip -o bin/resources/patches.zip
+
+      - name: Configure
+        working-directory: pcsx2-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+            -DCMAKE_PREFIX_PATH="$HOME/deps" \
+            -DCMAKE_C_COMPILER=clang-17 \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_EXE_LINKER_FLAGS_INIT='-fuse-ld=lld' \
+            -DCMAKE_MODULE_LINKER_FLAGS_INIT='-fuse-ld=lld' \
+            -DENABLE_SETCAP=OFF \
+            -DDISABLE_ADVANCE_SIMD=TRUE \
+            -DUSE_LINKED_FFMPEG=ON \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=OFF
+
+      - name: Build
+        working-directory: pcsx2-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache -z
+          ninja -C build
+          test -x build/bin/pcsx2-qt
+          ccache -s
+
+      - name: Verify tracer markers
+        working-directory: pcsx2-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          strings build/bin/pcsx2-qt | grep -F 'PCSX2_GIFTRACE'
+          strings build/bin/pcsx2-qt | grep -F '[GIFTRACE] MATCH'
+
+      - name: Package AppImage and build provenance
+        working-directory: pcsx2-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-artifacts"
+          cp build/bin/pcsx2-qt "$GITHUB_WORKSPACE/ci-artifacts/pcsx2-qt-unstripped"
+          .github/workflows/scripts/linux/appimage-qt.sh "$(realpath .)" "$(realpath ./build)" "$HOME/deps" "$APPIMAGE_NAME"
+          mv "$APPIMAGE_NAME.AppImage" "$GITHUB_WORKSPACE/ci-artifacts/"
+          cp "$GITHUB_WORKSPACE/pcsx2_gif_provenance_v2.patch" "$GITHUB_WORKSPACE/ci-artifacts/"
+          cp "$GITHUB_WORKSPACE/tools/pcsx2_giftrace_patch.py" "$GITHUB_WORKSPACE/ci-artifacts/"
+          cp "$GITHUB_WORKSPACE/tools/giftrace_decode.py" "$GITHUB_WORKSPACE/ci-artifacts/"
+          cp "$GITHUB_WORKSPACE/docs/PCSX2_GIF_PROVENANCE_V2.md" "$GITHUB_WORKSPACE/ci-artifacts/README.md"
+          printf '%s\n' "$PCSX2_COMMIT" > "$GITHUB_WORKSPACE/ci-artifacts/PCSX2_SOURCE_COMMIT.txt"
+          (cd "$GITHUB_WORKSPACE/ci-artifacts" && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCSX2-2.8.1-GIF-Provenance-v2-linux
+          path: ci-artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

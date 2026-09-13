@@ -44,7 +44,12 @@ jobs:
           test "$(git -C pcsx2-src describe --tags --exact-match HEAD)" = "v2.8.1"
           PCSX2_SOURCE_DIR="$GITHUB_WORKSPACE/pcsx2-src" python3 tools/pcsx2_giftrace_patch.py
           git -C pcsx2-src diff --check
-          git -C pcsx2-src diff -- pcsx2/Gif.cpp pcsx2/Gif_Unit.cpp > pcsx2_gif_provenance_v2.patch
+          git -C pcsx2-src diff -- \
+            pcsx2/Gif.cpp \
+            pcsx2/Gif_Unit.cpp \
+            pcsx2/DebugTools/Breakpoints.cpp \
+            pcsx2/x86/ix86-32/iR5900.cpp \
+            pcsx2/VMManager.cpp > pcsx2_gif_provenance_v2.patch
           test -s pcsx2_gif_provenance_v2.patch
 
       - name: Install build prerequisites
@@ -122,6 +127,8 @@ jobs:
           set -euo pipefail
           strings build/bin/pcsx2-qt | grep -F 'PCSX2_GIFTRACE'
           strings build/bin/pcsx2-qt | grep -F '[GIFTRACE] MATCH'
+          strings build/bin/pcsx2-qt | grep -F 'PCSX2_EEWRITE_TRACE'
+          strings build/bin/pcsx2-qt | grep -F '[EEWRITE] enabled:'
           strings build/bin/pcsx2-qt | grep -Fx 'v2.8.1'
 
       - name: Package AppImage and build provenance

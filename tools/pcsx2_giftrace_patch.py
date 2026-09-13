@@ -226,3 +226,222 @@ gif_unit_cpp.write_text(gu, encoding="utf-8")
 
 print(f"patched {gif_cpp}")
 print(f"patched {gif_unit_cpp}")
+
+# Generic EE write provenance tracer. This uses PCSX2's existing dynarec memcheck
+# machinery so it can observe ordinary recompiler stores without game-specific hooks.
+bp_cpp = root / "pcsx2/DebugTools/Breakpoints.cpp"
+rec_cpp = root / "pcsx2/x86/ix86-32/iR5900.cpp"
+vm_cpp = root / "pcsx2/VMManager.cpp"
+for p in (bp_cpp, rec_cpp, vm_cpp):
+    if not p.is_file():
+        raise SystemExit(f"PCSX2 source file missing: {p}")
+
+bp = bp_cpp.read_text(encoding="utf-8")
+rec = rec_cpp.read_text(encoding="utf-8")
+vm = vm_cpp.read_text(encoding="utf-8")
+
+bp_inc = '#include <cstdio>\n'
+if bp_inc not in bp:
+    raise SystemExit('Breakpoints.cpp include anchor not found')
+bp = bp.replace(bp_inc, bp_inc + '#include <cstdlib>\n\n', 1)
+
+bp_globals = 'bool CBreakPoints::corePaused = false;\n'
+if bp_globals not in bp:
+    raise SystemExit('Breakpoints.cpp globals anchor not found')
+
+write_impl = r'''
+
+// LocalizationRuntime v2: generic EE write provenance tracer.
+// Enable with PCSX2_EEWRITE_TRACE=1 and START/END/PATH environment variables.
+static FILE* s_eewrite_trace_file = nullptr;
+static u32 s_eewrite_trace_start = 0;
+static u32 s_eewrite_trace_end = 0;
+static bool s_eewrite_trace_initialized = false;
+
+static bool LocalizationEEWriteTraceTruthy(const char* name)
+{
+	const char* e = std::getenv(name);
+	return (e && e[0] && e[0] != '0');
+}
+
+static bool LocalizationEEWriteTraceEnvU32(const char* name, u32* value)
+{
+	const char* e = std::getenv(name);
+	if (!e || !e[0])
+		return false;
+	char* end = nullptr;
+	const unsigned long parsed = std::strtoul(e, &end, 0);
+	if (!end || *end != '\0')
+		return false;
+	*value = static_cast<u32>(parsed);
+	return true;
+}
+
+void LocalizationEEWriteTraceInitFromEnv()
+{
+	if (s_eewrite_trace_initialized)
+		return;
+	s_eewrite_trace_initialized = true;
+
+	if (!LocalizationEEWriteTraceTruthy("PCSX2_EEWRITE_TRACE"))
+		return;
+	if (!LocalizationEEWriteTraceEnvU32("PCSX2_EEWRITE_TRACE_START", &s_eewrite_trace_start) ||
+		!LocalizationEEWriteTraceEnvU32("PCSX2_EEWRITE_TRACE_END", &s_eewrite_trace_end) ||
+		s_eewrite_trace_end <= s_eewrite_trace_start)
+	{
+		std::fprintf(stderr, "[EEWRITE] invalid START/END; tracer disabled\n");
+		return;
+	}
+
+	const char* path = std::getenv("PCSX2_EEWRITE_TRACE_PATH");
+	if (!path || !path[0])
+		path = "/tmp/pcsx2_eewrite.log";
+	s_eewrite_trace_file = std::fopen(path, "wb");
+	if (!s_eewrite_trace_file)
+	{
+		std::fprintf(stderr, "[EEWRITE] failed to open %s\n", path);
+		return;
+	}
+
+	std::fprintf(s_eewrite_trace_file,
+		"# PCSX2 LocalizationRuntime v2 generic EE write trace\n"
+		"# range=[0x%08x,0x%08x)\n"
+		"# fields: cycle pc addr op rs rt imm rs64 rt_lo64 rt_hi64 sp ra\n",
+		s_eewrite_trace_start, s_eewrite_trace_end);
+	std::fflush(s_eewrite_trace_file);
+	std::fprintf(stderr, "[EEWRITE] enabled: %s range=%08x..%08x\n", path,
+		s_eewrite_trace_start, s_eewrite_trace_end);
+
+	CBreakPoints::AddMemCheck(BREAKPOINT_EE, s_eewrite_trace_start, s_eewrite_trace_end,
+		MEMCHECK_WRITE, MEMCHECK_LOG);
+}
+
+void LocalizationEEWriteTraceHit(u32 addr, u32 pc, u32 op)
+{
+	if (!s_eewrite_trace_file || addr >= s_eewrite_trace_end)
+		return;
+	const u32 rs = (op >> 21) & 31;
+	const u32 rt = (op >> 16) & 31;
+	const s16 imm = static_cast<s16>(op & 0xffff);
+	std::fprintf(s_eewrite_trace_file,
+		"%llu %08x %08x %08x %u %u %d %016llx %016llx %016llx %016llx %016llx\n",
+		static_cast<unsigned long long>(cpuRegs.cycle), pc, addr, op, rs, rt, static_cast<int>(imm),
+		static_cast<unsigned long long>(cpuRegs.GPR.r[rs].UD[0]),
+		static_cast<unsigned long long>(cpuRegs.GPR.r[rt].UD[0]),
+		static_cast<unsigned long long>(cpuRegs.GPR.r[rt].UD[1]),
+		static_cast<unsigned long long>(cpuRegs.GPR.n.sp.UD[0]),
+		static_cast<unsigned long long>(cpuRegs.GPR.n.ra.UD[0]));
+	std::fflush(s_eewrite_trace_file);
+}
+'''
+bp = bp.replace(bp_globals, bp_globals + write_impl, 1)
+bp_cpp.write_text(bp, encoding="utf-8")
+
+rec_decl_anchor = 'static bool g_resetEeScalingStats = false;\n'
+if rec_decl_anchor not in rec:
+    raise SystemExit('iR5900.cpp declaration anchor not found')
+rec = rec.replace(rec_decl_anchor, rec_decl_anchor + '\nextern void LocalizationEEWriteTraceHit(u32 addr, u32 pc, u32 op);\n', 1)
+
+old_dyn = r'''void dynarecMemcheck(size_t i)
+{
+	const u32 op = memRead32(cpuRegs.pc);
+	const OPCODE& opcode = GetInstruction(op);
+	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
+	{
+		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);
+		return;
+	}
+
+	auto mc = CBreakPoints::GetMemChecks(BREAKPOINT_EE)[i];
+
+	if (mc.hasCond)
+	{
+		if (!mc.cond.Evaluate())
+			return;
+	}
+
+	if (mc.result & MEMCHECK_LOG)
+	{
+		if (opcode.flags & IS_STORE)
+			DevCon.WriteLn("Hit store breakpoint @0x%x", cpuRegs.pc);
+		else
+			DevCon.WriteLn("Hit load breakpoint @0x%x", cpuRegs.pc);
+	}
+
+	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
+	VMManager::SetPaused(true);
+	recExitExecution();
+}
+'''
+new_dyn = r'''void dynarecMemcheck(size_t i, u32 addr)
+{
+	const u32 op = memRead32(cpuRegs.pc);
+	const OPCODE& opcode = GetInstruction(op);
+	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
+	{
+		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);
+		return;
+	}
+
+	auto mc = CBreakPoints::GetMemChecks(BREAKPOINT_EE)[i];
+
+	if (mc.hasCond)
+	{
+		if (!mc.cond.Evaluate())
+			return;
+	}
+
+	if (mc.result & MEMCHECK_LOG)
+	{
+		if (opcode.flags & IS_STORE)
+		{
+			DevCon.WriteLn("Hit store breakpoint @0x%x addr=0x%x", cpuRegs.pc, addr);
+			LocalizationEEWriteTraceHit(addr, cpuRegs.pc, op);
+		}
+		else
+			DevCon.WriteLn("Hit load breakpoint @0x%x addr=0x%x", cpuRegs.pc, addr);
+	}
+
+	if (mc.result & MEMCHECK_BREAK)
+	{
+		CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
+		VMManager::SetPaused(true);
+		recExitExecution();
+	}
+}
+'''
+if old_dyn not in rec:
+    raise SystemExit('dynarecMemcheck anchor not found')
+rec = rec.replace(old_dyn, new_dyn, 1)
+
+old_call = '''\t\t// hit the breakpoint
+\t\tif (checks[i].result & MEMCHECK_BREAK)
+\t\t{
+\t\t\txMOV(eax, i);
+\t\t\txFastCall((void*)dynarecMemcheck, eax);
+\t\t}
+'''
+new_call = '''\t\t// Hit/log the memcheck. Pass the standardized access address to the runtime helper.
+\t\tif (checks[i].result != MEMCHECK_IGNORE)
+\t\t{
+\t\t\txFastCall((void*)dynarecMemcheck, static_cast<u32>(i), ecx);
+\t\t}
+'''
+if old_call not in rec:
+    raise SystemExit('recMemcheck call anchor not found')
+rec = rec.replace(old_call, new_call, 1)
+rec_cpp.write_text(rec, encoding="utf-8")
+
+vm_decl_anchor = '#include <common/RedtapeWilCom.h>\n'
+if vm_decl_anchor not in vm:
+    raise SystemExit('VMManager.cpp include anchor not found')
+vm = vm.replace(vm_decl_anchor, vm_decl_anchor + '\nextern void LocalizationEEWriteTraceInitFromEnv();\n', 1)
+vm_init_anchor = '\tSysMemory::Reset();\n\tcpuReset();\n'
+if vm_init_anchor not in vm:
+    raise SystemExit('VMManager.cpp cpuReset anchor not found')
+vm = vm.replace(vm_init_anchor, vm_init_anchor + '\tLocalizationEEWriteTraceInitFromEnv();\n', 1)
+vm_cpp.write_text(vm, encoding="utf-8")
+
+print(f"patched {bp_cpp}")
+print(f"patched {rec_cpp}")
+print(f"patched {vm_cpp}")

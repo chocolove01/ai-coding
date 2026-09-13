@@ -6,6 +6,7 @@ on:
       - '.github/workflows/build-pcsx2-v281-gif-provenance-v2.yml'
       - 'tools/pcsx2_giftrace_patch.py'
       - 'tools/giftrace_decode.py'
+      - 'tools/giftrace_find_payload.py'
       - 'docs/PCSX2_GIF_PROVENANCE_V2.md'
   workflow_dispatch:
 
@@ -31,6 +32,16 @@ jobs:
           set -euo pipefail
           git clone --branch v2.8.1 --depth 1 --recurse-submodules --shallow-submodules https://github.com/PCSX2/pcsx2.git pcsx2-src
           test "$(git -C pcsx2-src rev-parse HEAD)" = "$PCSX2_COMMIT"
+          # v2.8.1 and v2.9.0 currently point to the same upstream commit. PCSX2's
+          # CMake version probe picks the highest tag at HEAD, so remove tag aliases
+          # at this commit and re-create only v2.8.1 to keep the LocalizationRuntime
+          # v1/v2 lineage and -version output explicitly pinned to v2.8.1.
+          while read -r tag; do
+            [[ -z "$tag" || "$tag" == "v2.8.1" ]] && continue
+            git -C pcsx2-src tag -d "$tag"
+          done < <(git -C pcsx2-src tag --points-at HEAD)
+          git -C pcsx2-src tag -f v2.8.1 "$PCSX2_COMMIT"
+          test "$(git -C pcsx2-src describe --tags --exact-match HEAD)" = "v2.8.1"
           PCSX2_SOURCE_DIR="$GITHUB_WORKSPACE/pcsx2-src" python3 tools/pcsx2_giftrace_patch.py
           git -C pcsx2-src diff --check
           git -C pcsx2-src diff -- pcsx2/Gif.cpp pcsx2/Gif_Unit.cpp > pcsx2_gif_provenance_v2.patch
@@ -104,13 +115,14 @@ jobs:
           test -x build/bin/pcsx2-qt
           ccache -s
 
-      - name: Verify tracer markers
+      - name: Verify version and tracer markers
         working-directory: pcsx2-src
         shell: bash
         run: |
           set -euo pipefail
           strings build/bin/pcsx2-qt | grep -F 'PCSX2_GIFTRACE'
           strings build/bin/pcsx2-qt | grep -F '[GIFTRACE] MATCH'
+          strings build/bin/pcsx2-qt | grep -Fx 'v2.8.1'
 
       - name: Package AppImage and build provenance
         working-directory: pcsx2-src
@@ -124,8 +136,10 @@ jobs:
           cp "$GITHUB_WORKSPACE/pcsx2_gif_provenance_v2.patch" "$GITHUB_WORKSPACE/ci-artifacts/"
           cp "$GITHUB_WORKSPACE/tools/pcsx2_giftrace_patch.py" "$GITHUB_WORKSPACE/ci-artifacts/"
           cp "$GITHUB_WORKSPACE/tools/giftrace_decode.py" "$GITHUB_WORKSPACE/ci-artifacts/"
+          cp "$GITHUB_WORKSPACE/tools/giftrace_find_payload.py" "$GITHUB_WORKSPACE/ci-artifacts/"
           cp "$GITHUB_WORKSPACE/docs/PCSX2_GIF_PROVENANCE_V2.md" "$GITHUB_WORKSPACE/ci-artifacts/README.md"
           printf '%s\n' "$PCSX2_COMMIT" > "$GITHUB_WORKSPACE/ci-artifacts/PCSX2_SOURCE_COMMIT.txt"
+          printf '%s\n' 'v2.8.1' > "$GITHUB_WORKSPACE/ci-artifacts/PCSX2_SOURCE_TAG.txt"
           (cd "$GITHUB_WORKSPACE/ci-artifacts" && sha256sum * > SHA256SUMS.txt)
 
       - name: Upload artifact
